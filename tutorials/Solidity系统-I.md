@@ -24,17 +24,17 @@
 
 我们来看看这个非常简单的合约例子：
 
-    contract Data {
+```Solidity
+contract Data {
 
-        uint public data;
+    uint public data;
 
-        function addData(uint data_) {
-            if (msg.sender == 0x692a70d2e424a56d2c6c27aa97d1a86395877b3a)
-                data = data_;
-        }
-
-
+    function addData(uint data_) {
+        if (msg.sender == 0x692a70d2e424a56d2c6c27aa97d1a86395877b3a)
+            data = data_;
     }
+}
+```
 
 这个合约允许用户添加和读取一个无符号整数。唯一被允许添加数据的是地址为`0x692a...`的账户。这个地址是一个十六进制的字面值，编译合约时会被添加到字节码中。
 
@@ -42,26 +42,26 @@
 
 事实上这就不可能。如果我们想要实现这样的功能，我们得提前准备好合约。一个简单的、使其更有弹性的方法，就是把当前所有者的地址放在一个storage变量里，并提供一个改变它的可能。
 
-    contract DataOwnerSettabl {
+```Solidity
+contract DataOwnerSettabl {
 
-        uint public data;
+    uint public data;
 
-        address public owner = msg.sender;
-
-
-        function addData(uint data_) {
-            if (msg.sender == owner)
-                data = data_;
-        }
+    address public owner = msg.sender;
 
 
-        function setOwner(address owner_) {
-            if (msg.sender == owner)
-                owner = owner_;
-        }
-
-
+    function addData(uint data_) {
+        if (msg.sender == owner)
+            data = data_;
     }
+
+
+    function setOwner(address owner_) {
+        if (msg.sender == owner)
+            owner = owner_;
+    }
+}
+```
 
 这个合约有一个`owner`字段（映射到存储）。这个字段被创建合约的账户地址初始化，并且之后能被当前所有者通过`setOwner`修改。`addData`里的防护还是一样的；唯一不同的是所有者地址没有被硬编码。
 
@@ -77,12 +77,113 @@
 
 我们现在来更新一下`data`合约使其这样工作，从把账户验证移到另一个合约开始。
 
-    contract AccountValidator {
+```Solidity
+contract AccountValidator {
 
-        address public owner = msg.sender;
+    address public owner = msg.sender;
 
 
-        function validator(address addr) constant returns (bool) {
-            
-        }
+    function validate(address addr) constant returns (bool) {
+        return addr == owner;
     }
+
+
+    function setOwner(address owner_) {
+        if (msg.sender == owner)
+            owner = owner_
+    }
+}
+
+
+contract DataExtrernalValidation {
+    uint public data;
+
+    AccountValidator _validator;
+
+
+    function DataExtrernalValidation(address validator) {
+        _validator = AccountValidator(validator);
+    }
+
+
+    function addData(uint data_) {
+        if (_validator.validate(msg.sender))
+            data = data_;
+    }
+
+
+    function setValidator(address validator) {
+        if (_validator.validate(msg.sender))
+            _validator = AccountValidator(validator);
+    }
+}
+```
+
+想要在链上使用这个合约，我们先得创建一个`AccountValidator`合约，再创建一个`DataExtrernalValidation`合约并通过构造函数注入 validator 的地址。当有人想要写入数据到`data`它会调用当前 validator 的`validate`方法以实现所有者检查。
+
+这挺好的，因为现在有了替换所有者检查合约的可能性。并且由于`AccountValidator`是个独立的合约，我们可以使用这个实例去完成更多其他合约的身份验证。
+
+不过还剩下一件事。我们仍然不能替换代码。我们做的所有只是将验证代码移到了合约之外。除 data 合约外，`AccountValidator`合约的代码再无法更改。幸运的是，Solidity 提供了一个非常简单且强大的解决方案——抽象。
+
+## 抽象方法
+
+使用抽象方法，validator 合约可以被改成这样：
+
+```Solidity
+contract AccountValidator {
+    function validate(address addr) constant returns (bool);
+}
+
+
+contract SingleAccountValidator is AccountValidator {
+
+    address public owner = msg.sender;
+
+
+    function validate(address addr) constant returns (bool) {
+        return addr == owner;
+    }
+
+
+    function setOwner(address owner_) {
+        if (msg.sender == owner)
+            owner = owner_;
+    }
+}
+```
+
+按照这些合约，data 合约不再使用具体的验证器合约，而是使用一个抽象（接口）表示，意味着我们可以选择要提供的实现。这点与 Java 和 C++ 之类的语言类似。假设我们想要允许更多的所有者账户，我们可以用这个合约来提供这个功能：
+
+```Solidity
+contract MultiAccountValidator is AccountValidator {
+
+    mapping(address => bool) public owners;
+
+
+    function MultiAccountValidator() {
+        owners[msg.sender] = true;
+    }
+
+
+    function validate(address addr) constant returns (bool) {
+        return owners[addr];
+    }
+
+
+    function addOwner(address addr) {
+        if (owners[msg.sender])
+            owners[addr] = true;
+    }
+}
+```
+
+最后，值得注意的是，你可以传入一个不是`AccountValidator`的合约。在你将地址转化为合约对象时没有任何类型检查，所以只有当合约被调用时才会显示。实际上只要合约有必需的方法，调用就能成功——即使它并未继承`AccountValidator`。
+
+当然，不推荐这样使用合约。
+
+## 总结
+
+合适的委托/委派/授权/代理是智能合约系统的重要组成部分，因为这样合约可以被替换。但有些东西需要注意：
+    + 委托需要的是类型不安全的转换，意思是在设置、更改合约时要分外小心。
+    + 一个系统里合约越多越难管理，并且小型系统的策略不一定适用于中型大型系统。
+    + 模块化是有代价的，
