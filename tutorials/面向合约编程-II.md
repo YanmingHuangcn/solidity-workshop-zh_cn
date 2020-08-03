@@ -80,6 +80,213 @@ contract PrePostCheck {
 
 ```Solidity
 contract Token {
-    
+
+    // 每个人的余额
+    mapping(address => uint) public balances;
+
+    mapping(address => bool) public blacklisted;
+
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        balances[msg.sender] = 1000000;
+    }
+
+
+    /*
+    转账
+    如果调用者在黑名单里，失败。
+    如果接收方没在黑名单里且调用者有足够资金，
+    资金就会被转到接收方账户里，否则调用方会被放进黑名单里，且账户清零
+    */
+    function transfer(uint _amount, address _dest) {
+        if (blacklisted[msg.sender])
+            return;
+        if (!blacklisted[_dest] && balances[msg.sender] >= _amount) {
+            balances[msg.sender] -= _amount;
+            balances[_dest] += _amount;
+        }
+        else {
+            balances[msg.sender] = 0;
+            blacklisted[msg.sender] = true;
+        }
+    }
 }
 ```
+
+在这里用了一大堆条件判断，但这跟之前看到的转账不同，这里的`transfer`可以基于合约状态做两件完全不同的事：一是把资金从一个账户转到另一个，二是清空调用者的账户并拉黑。所以，我们应该怎样解构这个呢？
+
+我们从条件判断来入手。我们有以下三个：
+
+1. `blacklisted[msg.sender] == true`
+
+2. `blacklisted[_dest] == false`
+
+3. `balances[msg.sender] >= _amount`
+
+其中我会认为只有`1`是前置条件。它断言调用者没有被拉黑，且如果被拉黑了那么余下的函数体都不会被执行。另外两个条件不应该被独立出来，因为它们是函数逻辑的一部分。如果它们之一或是两者都失败了，函数也会继续按照期望工作下去。
+
+我们现在就有了一个前置条件和零个后置条件。用上修饰器就会变成这样：
+
+```Solidity
+contract Token {
+
+    // 每个人的余额
+    mapping(address => uint) public balances;
+
+    mapping(address => bool) public blacklisted;
+
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        balances[msg.sender] = 1000000;
+    }
+
+
+    // msg.sender 不能是被拉黑的
+    modifier not_blacklisted {
+        if (blacklisted[msg.sender])
+            return;
+        _
+    }
+
+
+    /*
+    转账
+    如果调用者在黑名单里，失败。
+    如果接收方没在黑名单里且调用者有足够资金，
+    资金就会被转到接收方账户里，否则调用方会被放进黑名单里，且账户清零
+    */
+    function transfer(uint _amount, address _dest) not_blacklisted {
+        if (!blacklisted[_dest] && balances[msg.sender] >= _amount) {
+            balances[msg.sender] -= _amount;
+            balances[_dest] += _amount;
+        }
+        else {
+            balances[msg.sender] = 0;
+            blacklisted[msg.sender] = true;
+        }
+    }
+}
+```
+
+现在假设我们改一改程序，余额不足不会导致调用者被拉黑，只是阻止他们交易（实话说这样更理智一点）。这样我们就该把余额检查也改成前置条件。
+
+（注意文档说明我们也更新一下）
+
+```Solidity
+contract Token {
+
+    // 每个人的余额
+    mapping(address => uint) public balances;
+
+    mapping(address => bool) public blacklisted;
+
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        balances[msg.sender] = 1000000;
+    }
+
+
+    // msg.sender 不能是被拉黑的
+    modifier not_blacklisted {
+        if (blacklisted[msg.sender])
+            return;
+        _
+    }
+
+
+    // msg.sender 必须有高于‘x’的余额
+    modifier at_least(uint x) {
+        if (balances[msg.sender] < x)
+            throw;
+        _
+    }
+
+
+    /*
+    转账
+    如果调用者在黑名单里，失败。
+    如果接收方没在黑名单里且调用者有足够资金，
+    资金就会被转到接收方账户里，否则调用方会被放进黑名单里，且账户清零
+    */
+    function transfer(uint _amount, address _dest) not_blacklisted at_least(_amount) {
+        if (!blacklisted[_dest] && balances[msg.sender] >= _amount) {
+            balances[msg.sender] -= _amount;
+            balances[_dest] += _amount;
+        }
+        else {
+            balances[msg.sender] = 0;
+            blacklisted[msg.sender] = true;
+        }
+    }
+}
+```
+
+这个看起来干净多了，但我们还能做更多。我们其实已经分离了调整余额的逻辑与拉黑逻辑，意思就是我们可以把代码放进另一个函数里，再把`at_least`修饰器添加到新函数上。余额调整函数将会是私有的，这样只有`transfer`函数才能接触到它。并且，为了做到更干净，我们也可以分离拉黑代码（`else块里的代码）。
+
+```Solidity
+contract Token {
+
+    // 每个人的余额
+    mapping (address => uint) public balances;
+
+    mapping (address => bool) public blacklisted;
+
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        balances[msg.sender] = 1000000;
+    }
+
+
+    // msg.sender 不能是被拉黑的
+    modifier not_blacklisted {
+        if (blacklisted[msg.sender])
+            throw;
+        _
+    }
+
+
+    // msg.sender 必须有高于‘x’的余额
+    modifier at_least(uint x) {
+        if (balances[msg.sender] < x)
+            throw;
+        _
+    }
+
+
+    // 转账，当调用者余额不足时会失败
+    function __transfer(uint _amount, address _dest) private at_least(_amount) {
+        balances[msg.sender] -= _amount;
+        balances[_dest] += _amount;
+    }
+
+
+    // 拉黑一个账户
+    function __blacklist() private {
+        balances[msg.sender] = 0;
+        blacklisted[msg.sender] = true;
+    }
+
+
+    /*
+    转账
+    如果调用者在黑名单里，失败。
+    如果接收方没在黑名单里且调用者有足够资金，
+    资金就会被转到接收方账户里，否则调用方会被放进黑名单里，且账户清零
+    */
+    function transfer(uint _amount, address _dest) not_blacklisted {
+        if(!blacklisted[_dest])
+            __transfer(_amount, _dest);
+        else
+            __blacklist();
+    }
+
+}
+```
+
+注意这里其实可以直接用三元运算符，但为了可读性我们不用。
+
+而且，注意这里我们
