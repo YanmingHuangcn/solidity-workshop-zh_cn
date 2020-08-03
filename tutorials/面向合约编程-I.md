@@ -163,3 +163,239 @@ contract GuardedFunctionExample3 {
 看着前面的部分，可能会有人问“为啥要用修饰器把问题搞复杂呢”？如果我想要在其他函数复用这个检查，普通的解构就够了（例子2）。如果我想内联它以提高效率，我也就直接那么做了（例子1）。确实这样，但修饰器的语义更适合一个叫面向条件/条件导向编程的东西。COP 背后的基础思想被 Dr.Gavin Wood 在一篇[博客](https://medium.com/@gavofyork/condition-orientated-programming-969f6ba0161a#.8dw7jp1gq)里提出。这篇博客强调了一系列将（前置）条件和“商业逻辑”混合在一个函数里带来的丑陋副作用，并展示了怎么使用 COP 去避免这样。
 
 >当程序员认为一个条件（和它投射到的状态）是一回事但实际上它是有着微妙区别的另一回事时，要遭大重。
+
+一个这个的例子是让“the DAO”失败的代码。这已经被人总结过了，就是“the DAO”里的有些函数易受重放攻击，但这不是 EVM 的漏洞或是 Solidity 语言本身的问题，这是一个非常易犯的编程错误。这个漏洞的更多信息可以在[这篇](https://eng.erisindustries.com/programming/2016/06/18/lessons-learned-dao/) Solidity 核心开发者 RJ Catalano 的博文里找到。
+
+Gavin 解释说，*本质上讲，COP 在编程中把前置条件当作一等公民*——本质上这也就是 Solidity 中的自定义修饰器——然后继续给出了一些用它们写出 COP 风格 Solidity 代码的简单例子。
+
+##### 应用 COP
+
+这部分包含了使用博客所描述的技巧构建的一个简单应用。下面的合约是一个 token 合约的变体，我们从没有修饰器开始。
+
+```Solidity
+contract Token {
+
+    address public owner;
+
+    // 每个人的余额
+    mapping(address => uint) public balances;
+
+    mapping(address => bool) public blacklisted;
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        owner = msg.sender;
+        balances[msg.sender] = 1000000;
+    }
+
+
+    function blacklist(address _addr) {
+        if (msg.sender != owner)
+            return;
+        blacklisted[_addr] = true;
+    }
+
+
+    function transfer(uint _amount, address _dest) {
+        if (blacklisted[msg.sender])
+            return;
+        if (balances[msg.sender] >= _amount) {
+            balances[msg.sender] -= _amount;
+            balances[_dest] += _amount;
+        }
+    }
+}
+```
+
+我们要做的第一件事就是把`blacklist`函数的检查分离成一个修饰器然后把这个修饰器添加到函数上，就像这样：
+
+```Solidity
+modifier is_owner {
+    if (msg.sender != owner)
+        return;
+    _;
+}
+
+
+function blacklist(address _addr) is_owner {
+    blacklisted[_addr] = true;
+}
+```
+
+注意修饰器如果不接受参数就不需要`()`。
+
+搞好转账函数并不难。用在`is_owner`上的步骤可以同时用在两个检查上。难点在于我们需要为函数添加两个修饰器。
+
+```Solidity
+modifier not_blacklisted {
+    if (blacklisted[msg.sender])
+        return;
+    _;
+}
+
+
+modifier at_least(uint x) {
+    if (balances[msg.sender] < x)
+        return;
+    _;
+}
+
+
+function transfer(uint _amount, address _dest) not_blacklisted at_least(_amount) {
+    balances[msg.sender] -= _amount;
+    balances[_dest] += _amount;
+}
+```
+
+请注意修饰器的顺序是从左到右的，因此为了保持顺序，黑名单检查应该先写。并且余额检查稍微改了改，虽然也可以这样写：
+
+```Solidity
+modifier at_least(uint x) {
+    if (balances[msg.sender] >= x)
+        _;
+}
+```
+
+这个是改过的合约。肥肠干净。
+
+```Solidity
+contract COPToken {
+    address public owner;
+
+    // 每个人的余额
+    mapping(address => uint) public balances;
+
+    mapping(address => bool) public blacklisted;
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        owner = msg.sender;
+        balances[msg.sender] = 1000000;
+    }
+
+
+    modifier is_owner {
+        if (msg.sender != owner)
+            return;
+        _;
+    }
+
+
+    modifier not_blacklisted {
+        if (blacklisted[msg.sender])
+            return;
+        _;
+    }
+
+
+    modifier at_least(uint x) {
+        if (balances[msg.sender] < x)
+            return;
+        _;
+    }
+
+
+    function blacklist(address _addr) is_owner {
+        blacklisted[_addr] = true;
+    }
+
+
+    function transfer(uint _amount, address _dest) not_blacklisted at_least(_amount) {
+        balances[msg.sender] -= _amount;
+        balances[_dest] += _amount;
+    }
+}
+```
+
+##### 单元测试
+
+现在到了有意思的地方：我们怎么样保证所有修饰器都正常工作呢？到这个时候，我们需要做一些基本的单元测试。我们可以直接用不同的参数调用函数，然后检查结果，但这不够干净。我们要用继承来创建一个带有测试修饰器的函数的合约，和另外的函数用来测试被修饰的函数。被测试的合约甚至比之前的更简单。
+
+```Solidity
+contract Token {
+    // 每个人的余额
+    mapping(address => uint) public balances;
+
+    // 构造函数 - I wanna be a billionaire so fucking bad~
+    function Token() {
+        balances[msg.sender] = 1000000;
+    }
+
+
+    modifier at_least(uint x) {
+        if (balances[msg.sender] < x)
+            return;
+        _;
+    }
+
+
+    function transfer(uint _amount, address _dest) at_least(_amount) {
+        balances[msg.sender] -= _amount;
+        balances[_dest] += _amount;
+    }
+}
+
+
+contract TokenTest is Token {
+    address constant EMPTY_ACCOUNT = 0xDEADBEA7;
+
+
+    function atLeastTester(uint _amount) at_least(_amount) constant private returns (bool) {
+        return true;
+    }
+
+
+    function testAtLeastSuccess() returns (bool) {
+        balances[msg.sender] = 1000;
+        return atLeastTester(1000);
+    }
+
+
+    function testAtLeastFailBalanceTooLow() returns (bool) {
+        balances[msg.sender] = 999;
+        return !atLeastTester(1000);
+    }
+
+
+    // 测试：向账户转账0，然后检查余额
+    function testTransfer() returns (bool) {
+        balances[msg.sender] = 500;
+        balances[EMPTY_ACCOUNT] = 0;
+        transfer(500, EMPTY_ACCOUNT);
+        return balances[msg.sender] == 0 && balances[EMPTY_ACCOUNT] == 500;
+    }
+
+
+    // 测试：向账户转账0，然后检查余额
+    function testTransferFailBalanceTooLow() returns (bool) {
+        balances[msg.sender] = 500;
+        balances[EMPTY_ACCOUNT] = 0;
+        transfer(600, EMPTY_ACCOUNT);
+        return balances[msg.sender] == 500 && balances[EMPTY_ACCOUNT] == 0;
+    }
+}
+```
+
+测试合约里的第一个函数只是简单地跑了一下修饰器并在通过后返回 true。这就意味着当调用者的余额与提供的值相等或更高时，函数返回`true`，其他情况返回 false。接下来有两个函数检查修饰器是否按照设计工作了。最后有两个函数来检查转账函数的函数体是否按照期望工作。
+
+这样会让转账函数的测试变得更容易。如果修饰器通过了测试但转账函数没有，很明显转账函数有点问题。如果修饰器测试出了问题，在修复修饰器前我们就不能期望转账函数正常工作。
+
+### 复杂化
+
+COP 式修饰器的方法并不是没有代价的。
+
+在使用没有修饰器的普通函数时，是可以在出错时返回一个错误代码的。在示例合约中，我们也许会想要根据转账是否成功、是由于调用者在黑名单里还是余额不足返回不同的错误代码。这个在函数被其他合约调用时会很有用。修饰器在这个场景里有点“重”了，因为它们能做的就是 throw，即终止虚拟机并重置所有改动，或者 return，返回一个空值。
+
+另一个问题就是当“事情正式了”之后的经典问题——代码会变得更加难写。举个例子，一个具有多重嵌套条件的函数，而且每个部分都有一大堆逻辑。Gavin 的例子用了个转帐逻辑（和它的检查）运行后调用的投票回绝函数，但事情可能会复杂很多；投票函数是默认调用的，它上面的自定义修饰器不接收参数，但如果有另外的函数应当根据交易结果被调用，并且那些函数反过来也有相似的条件，这样正确使用 COP 会变得非常困难。
+
+### 总结
+
+这是 Solidity 智能合约编写中的一个非常有趣的方法。和正式的验证、新的单元测试、静态分析工具、新的计划功能诸如 lambda 函数，以及坚持使用已有的安全语言功能，我们有望避免“the DAO”事件再次发生。
+
+还有一个需要提到的是按合约设计并不是什么只适用于特殊语言（原文niche languages，非常精妙）的晦涩理论架构，它是一个很完善的编程范式，也有很多个能让它在主流语言比如 C++ 和 Java （某种程度上）中成立的库。某些语言（例如 C++）甚至有完整的语言支持。
+
+最后，我十分不愿意在这里加入个人意见，但由于我本质上是在使用 Slock.it 的合约作为一个反面教材，我想指出的是我并不想责怪他们的程序员。没人能写出100%没有漏洞的完美代码，这也基本是他们应该做的。至少他们有足够的远见，搞了个安全锁来防止以太币直接被吸出合同。（Slock.it 的联合创始人 Christoph Jentzsch 发布了 DAO 提案框架的首个版本）
+
+下个部分将会包含更多高阶合约和功能。会更贴合 Gavin 在他的教程里发布的第二部分。
+
+Happy (and safe) smart contract writing!
