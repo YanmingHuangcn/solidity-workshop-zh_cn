@@ -182,8 +182,10 @@ contract C {}
 .data
 ```
 
-这里在 return 结束，意思是我们也可以在第一个`RETURN`处把操作码截断。
+这里在 return 处结束，意思是我们也可以在第一个`RETURN`处把操作码截断。
 
 `PUSH1 0x60 PUSH1 0x40 MSTORE PUSH1 0xA DUP1 PUSH1 0x10 PUSH1 0x0 CODECOPY PUSH1 0x0 RETURN`
 
-这就是合约的`init`部分。这里先把数字`0x60`和`0x40``PUSH`到栈里，然后运行`MSTORE`.
+这就是合约的`init`部分。这里先把数字`0x60`和`0x40``PUSH`到栈里，然后运行`MSTORE`。根据[黄皮书](http://gavwood.com/paper.pdf)（27页），其实不存在`PUSH`指令，而是有32个不同的`PUSHn`指令集，`for n = 1 to 32`。看操作码我们就能发现`PUSH`其实是`PUSH1`，它只是简单地把下一个字节入栈（这也可以通过观察被入栈值的字节大小看出）。
+
+当到了`MSTORE`指令时，我们饿栈里已经有了两个东西：`0x60`，和（栈顶的）`0x40`。在黄皮书的26页，写着`MSTORE`被用来在内存里保存一个词。它需要两个参数：第一个用于偏移量，第二个是那个词。在这里它会把`0x60`保存到地址`0x40`。
